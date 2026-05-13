@@ -38,8 +38,6 @@ npm run start -- -H 0.0.0.0 -p 18673
 data/benchmark-results.jsonl
 ```
 
-该文件已被 `.gitignore` 排除，不会提交到开源仓库。
-
 ## License
 
 MIT
