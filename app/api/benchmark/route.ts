@@ -1,4 +1,9 @@
 import { appendBenchmarkHistory, truncatePrompt } from "@/lib/benchmark-history";
+import {
+  getProtocolAdapter,
+  protocolAdapters,
+  type BenchmarkProtocol,
+} from "@/lib/benchmark-protocols";
 
 type BenchmarkRequest = {
   apiKey?: unknown;
@@ -7,6 +12,11 @@ type BenchmarkRequest = {
   prompt?: unknown;
   concurrency?: unknown;
   totalRequests?: unknown;
+  protocol?: unknown;
+  providerPreset?: unknown;
+  customMethod?: unknown;
+  customHeaders?: unknown;
+  customBody?: unknown;
 };
 
 type RequestResult =
@@ -23,6 +33,10 @@ function readString(value: unknown, field: string) {
   }
 
   return value.trim();
+}
+
+function readOptionalString(value: unknown) {
+  return typeof value === "string" ? value : undefined;
 }
 
 function readHeaderValue(value: unknown, field: string) {
@@ -45,8 +59,8 @@ function readPositiveInteger(value: unknown, field: string, max: number) {
   return Math.min(numberValue, max);
 }
 
-function readUrl(value: unknown) {
-  const url = readString(value, "URL");
+function readUrl(value: unknown, modelName: string) {
+  const url = readString(value, "URL").replaceAll("{{MODEL}}", encodeURIComponent(modelName));
   const parsed = new URL(url);
 
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
@@ -56,29 +70,35 @@ function readUrl(value: unknown) {
   return parsed.toString();
 }
 
+function readProtocol(value: unknown) {
+  if (typeof value !== "string" || !(value in protocolAdapters)) {
+    return "openai-chat" satisfies BenchmarkProtocol;
+  }
+
+  return value as BenchmarkProtocol;
+}
+
 async function sendRequest(input: {
   apiKey: string;
   url: string;
   modelName: string;
   prompt: string;
+  protocol: BenchmarkProtocol;
+  customMethod?: string;
+  customHeaders?: string;
+  customBody?: string;
 }) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   const startTime = performance.now();
 
   try {
-    const response = await fetch(input.url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${input.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: input.modelName,
-        messages: [{ role: "user", content: input.prompt }],
-        stream: false,
-        reasoning: false,
-      }),
+    const adapter = getProtocolAdapter(input.protocol);
+    const builtRequest = adapter.buildRequest(input);
+    const response = await fetch(builtRequest.url, {
+      method: builtRequest.method,
+      headers: builtRequest.headers,
+      body: builtRequest.method === "GET" ? undefined : builtRequest.body,
       signal: controller.signal,
     });
 
@@ -88,13 +108,12 @@ async function sendRequest(input: {
       return { success: false, error: `HTTP ${response.status}: ${responseText}` } satisfies RequestResult;
     }
 
-    const responseJson = JSON.parse(responseText) as { usage?: { total_tokens?: number } };
-    const tokens = responseJson.usage?.total_tokens ?? 0;
+    const responseJson = JSON.parse(responseText) as unknown;
 
     return {
       success: true,
       latency: (performance.now() - startTime) / 1000,
-      tokens,
+      tokens: adapter.extractTokens(responseJson),
     } satisfies RequestResult;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -132,15 +151,29 @@ export async function POST(request: Request) {
 
   try {
     const apiKey = readHeaderValue(body.apiKey, "API Key");
-    const url = readUrl(body.url);
+    const protocol = readProtocol(body.protocol);
+    const providerPreset = readOptionalString(body.providerPreset) || "custom";
     const modelName = readString(body.modelName, "模型名称");
+    const url = readUrl(body.url, modelName);
     const prompt = readString(body.prompt, "测试 Prompt");
     const concurrency = readPositiveInteger(body.concurrency, "并发数", MAX_CONCURRENCY);
     const totalRequests = readPositiveInteger(body.totalRequests, "总批次数", MAX_TOTAL_REQUESTS);
+    const customMethod = readOptionalString(body.customMethod);
+    const customHeaders = readOptionalString(body.customHeaders);
+    const customBody = readOptionalString(body.customBody);
 
     const startTime = performance.now();
     const results = await runWithConcurrency(totalRequests, concurrency, () =>
-      sendRequest({ apiKey, url, modelName, prompt }),
+      sendRequest({
+        apiKey,
+        url,
+        modelName,
+        prompt,
+        protocol,
+        customMethod,
+        customHeaders,
+        customBody,
+      }),
     );
     const totalTime = (performance.now() - startTime) / 1000;
 
@@ -167,6 +200,8 @@ export async function POST(request: Request) {
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       url,
+      protocol,
+      providerPreset,
       modelName,
       prompt: truncatePrompt(prompt),
       concurrency,

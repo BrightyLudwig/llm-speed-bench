@@ -2,10 +2,14 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
+import { providerPresets, protocolOptions, type BenchmarkProtocol } from "@/lib/benchmark-protocols";
+
 type BenchmarkHistoryRow = {
   id: string;
   createdAt: string;
   url: string;
+  protocol: BenchmarkProtocol;
+  providerPreset: string;
   modelName: string;
   prompt: string;
   concurrency: number;
@@ -39,14 +43,21 @@ type BenchmarkResult = {
 };
 
 type ThemeName = "dark" | "light";
+type FormMode = "protocol" | "custom";
 
 const defaultForm = {
+  mode: "protocol" as FormMode,
   apiKey: "",
+  providerPreset: "custom",
+  protocol: "openai-chat" as BenchmarkProtocol,
   url: "https://aigw-gzgy2.cucloud.cn:8443/v1/chat/completions",
   modelName: "Qwen3.5-397B-A17B",
   prompt: "你是谁",
   concurrency: 1,
   totalRequests: 3,
+  customMethod: "POST",
+  customHeaders: '{\n  "Authorization": "Bearer {{API_KEY}}",\n  "Content-Type": "application/json"\n}',
+  customBody: '{\n  "model": "{{MODEL}}",\n  "messages": [{ "role": "user", "content": "{{PROMPT}}" }],\n  "stream": false\n}',
 };
 
 const themeStyles = {
@@ -112,39 +123,42 @@ function formatDate(value: string) {
   }).format(new Date(value));
 }
 
+function getProtocolName(protocol: BenchmarkProtocol) {
+  return protocolOptions.find((item) => item.id === protocol)?.name ?? protocol;
+}
+
+function getProviderName(providerPreset: string) {
+  return providerPresets.find((item) => item.id === providerPreset)?.name ?? providerPreset;
+}
+
 function buildCodePreview(form: typeof defaultForm) {
-  return `const payload = {
-  model: "${form.modelName || "<model_name>"}",
-  messages: [{ role: "user", content: ${JSON.stringify(form.prompt || "<test_prompt>")} }],
-  stream: false,
-  reasoning: false,
-};
-
-const headers = {
-  Authorization: "Bearer <API_KEY_FROM_FORM>",
-  "Content-Type": "application/json",
-};
-
-const concurrency = ${form.concurrency};
-const totalRequests = ${form.totalRequests};
-
-async function sendRequest() {
-  const startedAt = performance.now();
-  const response = await fetch("${form.url || "<url>"}", {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  });
-  const text = await response.text();
-  const latency = (performance.now() - startedAt) / 1000;
-
-  if (!response.ok) {
-    return { success: false, error: \`HTTP \${response.status}: \${text}\` };
+  if (form.mode === "custom") {
+    return `const response = await fetch("${form.url || "<url>"}", {
+  method: "${form.customMethod || "POST"}",
+  headers: ${form.customHeaders.replaceAll("{{API_KEY}}", "<API_KEY_FROM_FORM>")},
+  body: JSON.stringify(${form.customBody
+    .replaceAll("{{API_KEY}}", "<API_KEY_FROM_FORM>")
+    .replaceAll("{{MODEL}}", form.modelName || "<model>")
+    .replaceAll("{{PROMPT}}", form.prompt || "<prompt>")}),
+});`;
   }
 
-  const json = JSON.parse(text);
-  return { success: true, latency, tokens: json.usage?.total_tokens ?? 0 };
-}`;
+  return `// ${getProtocolName(form.protocol)}
+const payload = buildProtocolPayload({
+  protocol: "${form.protocol}",
+  model: "${form.modelName || "<model_name>"}",
+  prompt: ${JSON.stringify(form.prompt || "<test_prompt>")},
+  stream: false,
+});
+
+const response = await fetch("${form.url || "<url>"}", {
+  method: "POST",
+  headers: {
+    Authorization: "Bearer <API_KEY_FROM_FORM>",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify(payload),
+});`;
 }
 
 export default function Home() {
@@ -154,12 +168,20 @@ export default function Home() {
   const [isRunning, setIsRunning] = useState(false);
   const [historyRows, setHistoryRows] = useState<BenchmarkHistoryRow[]>([]);
   const [historyError, setHistoryError] = useState("");
+  const [historyPage, setHistoryPage] = useState(1);
   const [themeName, setThemeName] = useState<ThemeName>("light");
 
   const codePreview = useMemo(() => buildCodePreview(form), [form]);
-  const topHistoryRows = useMemo(
-    () => [...historyRows].sort((left, right) => right.tokensPerSecond - left.tokensPerSecond).slice(0, 5),
+  const sortedHistoryRows = useMemo(
+    () => [...historyRows].sort((left, right) => right.tokensPerSecond - left.tokensPerSecond),
     [historyRows],
+  );
+  const historyPageSize = 5;
+  const historyPageCount = Math.max(1, Math.ceil(sortedHistoryRows.length / historyPageSize));
+  const currentHistoryPage = Math.min(historyPage, historyPageCount);
+  const pagedHistoryRows = sortedHistoryRows.slice(
+    (currentHistoryPage - 1) * historyPageSize,
+    currentHistoryPage * historyPageSize,
   );
   const theme = themeStyles[themeName];
 
@@ -173,6 +195,7 @@ export default function Home() {
       }
 
       setHistoryRows(data.rows ?? []);
+      setHistoryPage(1);
       setHistoryError("");
     } catch (caughtError) {
       setHistoryError(caughtError instanceof Error ? caughtError.message : "读取历史失败");
@@ -197,7 +220,10 @@ export default function Home() {
       const response = await fetch("/api/benchmark", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify({
+          ...form,
+          protocol: form.mode === "custom" ? "custom-json" : form.protocol,
+        }),
       });
       const data = await response.json();
 
@@ -209,6 +235,7 @@ export default function Home() {
       setResult(benchmarkResult);
       if (benchmarkResult.historyRow) {
         setHistoryRows((current) => [benchmarkResult.historyRow!, ...current]);
+        setHistoryPage(1);
       } else {
         await loadHistory();
       }
@@ -219,16 +246,30 @@ export default function Home() {
     }
   }
 
+  function applyProviderPreset(providerId: string) {
+    const preset = providerPresets.find((item) => item.id === providerId) ?? providerPresets[0];
+    setForm({
+      ...form,
+      providerPreset: preset.id,
+      protocol: preset.protocol,
+      url: preset.url || form.url,
+      mode: preset.protocol === "custom-json" ? "custom" : "protocol",
+    });
+  }
+
   return (
     <main className={`min-h-screen px-5 py-8 transition-colors md:px-8 ${theme.main}`}>
       <div className="mx-auto flex max-w-[1500px] flex-col gap-6">
         <header className={`rounded-3xl border p-6 backdrop-blur ${theme.header}`}>
-          <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <p className={`text-sm uppercase tracking-[0.4em] ${theme.eyebrow}`}>Public LLM Arena Bench</p>
-              <h1 className="mt-3 text-3xl font-bold md:text-5xl">公开大模型 API 性能竞技场</h1>
-              <p className={`mt-4 max-w-3xl ${theme.muted}`}>
-                面向所有互联网用户的模型速度测试平台：提交你的 API 地址、模型名称与测试参数，系统会生成性能报告并进入公开 Tokens/s 排行榜。API Key 仅用于本次请求，不会展示或保存。
+              <div className="flex flex-wrap items-center gap-3">
+                <p className={`text-sm uppercase tracking-[0.4em] ${theme.eyebrow}`}>Public LLM Arena Bench</p>
+                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${theme.pill}`}>OPEN LEADERBOARD</span>
+              </div>
+              <h1 className="mt-4 max-w-4xl text-4xl font-black tracking-[-0.04em] md:text-6xl">公开大模型 API 性能竞技场</h1>
+              <p className={`mt-5 max-w-3xl text-lg leading-8 ${theme.muted}`}>
+                支持 OpenAI Chat、Responses、Claude Messages、Gemini、Cohere、Jina 和高级 JSON 请求模板。API Key 仅用于本次请求，不会展示或保存。
               </p>
             </div>
             <button
@@ -244,8 +285,8 @@ export default function Home() {
         <section className={`rounded-3xl border p-6 ${theme.panel}`}>
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-xl font-semibold">公开性能排行榜 Top 5</h2>
-              <p className={`mt-1 text-sm ${theme.softMuted}`}>按 Tokens/s 从高到低排序，突出全站最快的 5 次测试。</p>
+              <h2 className="text-xl font-semibold">公开性能排行榜</h2>
+              <p className={`mt-1 text-sm ${theme.softMuted}`}>按 Tokens/s 从高到低排序，分页展示全部历史测试。</p>
             </div>
             <button
               type="button"
@@ -257,46 +298,88 @@ export default function Home() {
           </div>
 
           {historyError && <p className={`mb-4 rounded-2xl border p-3 text-sm ${theme.errorBox}`}>{historyError}</p>}
-          {topHistoryRows.length === 0 ? (
+          {pagedHistoryRows.length === 0 ? (
             <p className={theme.softMuted}>暂无历史结果。</p>
           ) : (
-            <div className="overflow-auto">
-              <table className="w-full min-w-[78rem] border-separate border-spacing-y-2 text-left text-sm">
-                <thead className={theme.tableHead}>
-                  <tr>
-                    <th className="px-3 py-2 font-medium">时间</th>
-                    <th className="px-3 py-2 font-medium">地址</th>
-                    <th className="px-3 py-2 font-medium">模型 / Prompt</th>
-                    <th className="px-3 py-2 font-medium">并发/批次</th>
-                    <th className="px-3 py-2 font-medium">成功/失败</th>
-                    <th className="px-3 py-2 font-bold">TPS</th>
-                    <th className="px-3 py-2 font-bold">Tokens/s</th>
-                    <th className="px-3 py-2 font-bold">平均延迟</th>
-                    <th className="px-3 py-2 font-bold">总耗时</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {topHistoryRows.map((row) => (
-                    <tr key={row.id} className={`rounded-2xl border ${theme.row}`}>
-                      <td className="rounded-l-2xl px-3 py-3 align-top whitespace-nowrap">{formatDate(row.createdAt)}</td>
-                      <td className="px-3 py-3 align-top">
-                        <div className="max-w-[24rem] truncate font-medium" title={row.url}>{row.url}</div>
-                      </td>
-                      <td className="px-3 py-3 align-top">
-                        <div className="max-w-52 truncate font-medium" title={row.modelName}>{row.modelName}</div>
-                        <div className={`mt-1 max-w-52 truncate text-xs ${theme.softMuted}`} title={row.prompt}>{row.prompt}</div>
-                      </td>
-                      <td className="px-3 py-3 align-top whitespace-nowrap">{row.concurrency} / {row.totalRequests}</td>
-                      <td className="px-3 py-3 align-top whitespace-nowrap">{row.successCount} / {row.failureCount}</td>
-                      <td className="px-3 py-3 align-top font-bold whitespace-nowrap">{formatNumber(row.tps)}</td>
-                      <td className="px-3 py-3 align-top font-bold whitespace-nowrap">{formatNumber(row.tokensPerSecond)}</td>
-                      <td className="px-3 py-3 align-top font-bold whitespace-nowrap">{formatNumber(row.averageLatency)} 秒</td>
-                      <td className="rounded-r-2xl px-3 py-3 align-top font-bold whitespace-nowrap">{formatNumber(row.totalTime)} 秒</td>
+            <>
+              <div className="overflow-auto">
+                <table className="w-full min-w-[96rem] border-separate border-spacing-y-2 text-left text-sm">
+                  <thead className={theme.tableHead}>
+                    <tr>
+                      <th className="px-3 py-2 font-medium">排名</th>
+                      <th className="px-3 py-2 font-medium">时间</th>
+                      <th className="px-3 py-2 font-medium">协议</th>
+                      <th className="px-3 py-2 font-medium">服务商</th>
+                      <th className="px-3 py-2 font-medium">地址</th>
+                      <th className="px-3 py-2 font-medium">模型</th>
+                      <th className="px-3 py-2 font-medium">Prompt</th>
+                      <th className="px-3 py-2 font-medium">并发/批次</th>
+                      <th className="px-3 py-2 font-medium">成功/失败</th>
+                      <th className="px-3 py-2 font-bold">TPS</th>
+                      <th className="px-3 py-2 font-bold">Tokens/s</th>
+                      <th className="px-3 py-2 font-bold">平均延迟</th>
+                      <th className="px-3 py-2 font-bold">总耗时</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {pagedHistoryRows.map((row, index) => {
+                      const rank = (currentHistoryPage - 1) * historyPageSize + index + 1;
+
+                      return (
+                        <tr key={row.id} className={`rounded-2xl border ${theme.row}`}>
+                          <td className="rounded-l-2xl px-3 py-3 align-top whitespace-nowrap">
+                            <span className={`inline-flex h-8 w-8 items-center justify-center rounded-full text-sm font-black ${rank === 1 ? "bg-gradient-to-br from-amber-300 to-fuchsia-500 text-white" : theme.pill}`}>
+                              {rank}
+                            </span>
+                          </td>
+                          <td className="px-3 py-3 align-top whitespace-nowrap">{formatDate(row.createdAt)}</td>
+                          <td className="px-3 py-3 align-top whitespace-nowrap">{getProtocolName(row.protocol)}</td>
+                          <td className="px-3 py-3 align-top whitespace-nowrap">{getProviderName(row.providerPreset)}</td>
+                          <td className="px-3 py-3 align-top">
+                            <div className="max-w-[20rem] truncate font-medium" title={row.url}>{row.url}</div>
+                          </td>
+                          <td className="px-3 py-3 align-top">
+                            <div className="max-w-48 truncate font-medium" title={row.modelName}>{row.modelName}</div>
+                          </td>
+                          <td className="px-3 py-3 align-top">
+                            <div className={`max-w-56 truncate ${theme.softMuted}`} title={row.prompt}>{row.prompt}</div>
+                          </td>
+                          <td className="px-3 py-3 align-top whitespace-nowrap">{row.concurrency} / {row.totalRequests}</td>
+                          <td className="px-3 py-3 align-top whitespace-nowrap">{row.successCount} / {row.failureCount}</td>
+                          <td className="px-3 py-3 align-top font-bold whitespace-nowrap">{formatNumber(row.tps)}</td>
+                          <td className="px-3 py-3 align-top font-bold whitespace-nowrap">{formatNumber(row.tokensPerSecond)}</td>
+                          <td className="px-3 py-3 align-top font-bold whitespace-nowrap">{formatNumber(row.averageLatency)} 秒</td>
+                          <td className="px-3 py-3 align-top font-bold whitespace-nowrap">{formatNumber(row.totalTime)} 秒</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                <p className={`text-sm ${theme.softMuted}`}>
+                  第 {currentHistoryPage} / {historyPageCount} 页，共 {sortedHistoryRows.length} 条测试记录
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    disabled={currentHistoryPage <= 1}
+                    onClick={() => setHistoryPage((current) => Math.max(1, current - 1))}
+                    className={`rounded-2xl border px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${theme.toggle}`}
+                  >
+                    上一页
+                  </button>
+                  <button
+                    type="button"
+                    disabled={currentHistoryPage >= historyPageCount}
+                    onClick={() => setHistoryPage((current) => Math.min(historyPageCount, current + 1))}
+                    className={`rounded-2xl border px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${theme.toggle}`}
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
+            </>
           )}
         </section>
 
@@ -305,12 +388,59 @@ export default function Home() {
             <div className="mb-6 flex items-center justify-between gap-4">
               <div>
                 <h2 className="text-xl font-semibold">提交一次公开测速</h2>
-                <p className={`mt-1 text-sm ${theme.softMuted}`}>并发上限 20，总批次数上限 200；测试结果会进入公开榜单。</p>
+                <p className={`mt-1 text-sm ${theme.softMuted}`}>协议模式适合常见平台；高级 JSON 适合任意兼容接口。</p>
               </div>
-              <span className={`rounded-full px-3 py-1 text-xs ${theme.pill}`}>公开提交</span>
+              <span className={`rounded-full px-3 py-1 text-xs ${theme.pill}`}>多协议</span>
+            </div>
+
+            <div className="mb-5 grid gap-3 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => setForm({ ...form, mode: "protocol", protocol: form.protocol === "custom-json" ? "openai-chat" : form.protocol })}
+                className={`rounded-2xl border px-4 py-3 text-sm font-semibold transition ${form.mode === "protocol" ? theme.button : theme.toggle}`}
+              >
+                协议模式
+              </button>
+              <button
+                type="button"
+                onClick={() => setForm({ ...form, mode: "custom", protocol: "custom-json" })}
+                className={`rounded-2xl border px-4 py-3 text-sm font-semibold transition ${form.mode === "custom" ? theme.button : theme.toggle}`}
+              >
+                高级 JSON
+              </button>
             </div>
 
             <div className="space-y-5">
+              {form.mode === "protocol" && (
+                <>
+                  <label className="block">
+                    <span className={`text-sm ${theme.muted}`}>服务商预设</span>
+                    <select
+                      value={form.providerPreset}
+                      onChange={(event) => applyProviderPreset(event.target.value)}
+                      className={`mt-2 w-full rounded-2xl border px-4 py-3 outline-none transition ${theme.input}`}
+                    >
+                      {providerPresets.map((preset) => (
+                        <option key={preset.id} value={preset.id}>{preset.name}</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="block">
+                    <span className={`text-sm ${theme.muted}`}>调用协议</span>
+                    <select
+                      value={form.protocol}
+                      onChange={(event) => setForm({ ...form, protocol: event.target.value as BenchmarkProtocol, providerPreset: "custom" })}
+                      className={`mt-2 w-full rounded-2xl border px-4 py-3 outline-none transition ${theme.input}`}
+                    >
+                      {protocolOptions.filter((item) => item.id !== "custom-json").map((item) => (
+                        <option key={item.id} value={item.id}>{item.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                </>
+              )}
+
               <label className="block">
                 <span className={`text-sm ${theme.muted}`}>API Key</span>
                 <input
@@ -327,7 +457,7 @@ export default function Home() {
                 <span className={`text-sm ${theme.muted}`}>URL</span>
                 <input
                   value={form.url}
-                  onChange={(event) => setForm({ ...form, url: event.target.value })}
+                  onChange={(event) => setForm({ ...form, url: event.target.value, providerPreset: "custom" })}
                   className={`mt-2 w-full rounded-2xl border px-4 py-3 outline-none transition ${theme.input}`}
                   required
                 />
@@ -353,6 +483,40 @@ export default function Home() {
                   required
                 />
               </label>
+
+              {form.mode === "custom" && (
+                <>
+                  <label className="block">
+                    <span className={`text-sm ${theme.muted}`}>HTTP Method</span>
+                    <input
+                      value={form.customMethod}
+                      onChange={(event) => setForm({ ...form, customMethod: event.target.value })}
+                      className={`mt-2 w-full rounded-2xl border px-4 py-3 outline-none transition ${theme.input}`}
+                      required
+                    />
+                  </label>
+                  <label className="block">
+                    <span className={`text-sm ${theme.muted}`}>Headers JSON（支持 {"{{API_KEY}}"}）</span>
+                    <textarea
+                      value={form.customHeaders}
+                      onChange={(event) => setForm({ ...form, customHeaders: event.target.value })}
+                      rows={5}
+                      className={`mt-2 w-full resize-none rounded-2xl border px-4 py-3 font-mono text-sm outline-none transition ${theme.input}`}
+                      required
+                    />
+                  </label>
+                  <label className="block">
+                    <span className={`text-sm ${theme.muted}`}>Body JSON（支持 {"{{MODEL}}"} / {"{{PROMPT}}"}）</span>
+                    <textarea
+                      value={form.customBody}
+                      onChange={(event) => setForm({ ...form, customBody: event.target.value })}
+                      rows={8}
+                      className={`mt-2 w-full resize-none rounded-2xl border px-4 py-3 font-mono text-sm outline-none transition ${theme.input}`}
+                      required
+                    />
+                  </label>
+                </>
+              )}
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <label className="block">

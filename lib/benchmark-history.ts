@@ -1,10 +1,14 @@
 import { mkdir, readFile, appendFile } from "fs/promises";
 import path from "path";
 
+import type { BenchmarkProtocol } from "@/lib/benchmark-protocols";
+
 export type BenchmarkHistoryRow = {
   id: string;
   createdAt: string;
   url: string;
+  protocol: BenchmarkProtocol;
+  providerPreset: string;
   modelName: string;
   prompt: string;
   concurrency: number;
@@ -24,13 +28,13 @@ export type BenchmarkHistoryRow = {
 const dataDirectory = path.join(process.cwd(), "data");
 const historyFile = path.join(dataDirectory, "benchmark-results.jsonl");
 
-function isHistoryRow(value: unknown): value is BenchmarkHistoryRow {
+function normalizeHistoryRow(value: unknown): BenchmarkHistoryRow | null {
   if (!value || typeof value !== "object") {
-    return false;
+    return null;
   }
 
   const row = value as Record<string, unknown>;
-  return (
+  const isValid =
     typeof row.id === "string" &&
     typeof row.createdAt === "string" &&
     typeof row.url === "string" &&
@@ -47,8 +51,33 @@ function isHistoryRow(value: unknown): value is BenchmarkHistoryRow {
     typeof row.minLatency === "number" &&
     typeof row.maxLatency === "number" &&
     typeof row.totalTokens === "number" &&
-    Array.isArray(row.errors)
-  );
+    Array.isArray(row.errors);
+
+  if (!isValid) {
+    return null;
+  }
+
+  return {
+    id: row.id as string,
+    createdAt: row.createdAt as string,
+    url: row.url as string,
+    protocol: typeof row.protocol === "string" ? (row.protocol as BenchmarkProtocol) : "openai-chat",
+    providerPreset: typeof row.providerPreset === "string" ? row.providerPreset : "custom",
+    modelName: row.modelName as string,
+    prompt: row.prompt as string,
+    concurrency: row.concurrency as number,
+    totalRequests: row.totalRequests as number,
+    totalTime: row.totalTime as number,
+    successCount: row.successCount as number,
+    failureCount: row.failureCount as number,
+    tps: row.tps as number,
+    tokensPerSecond: row.tokensPerSecond as number,
+    averageLatency: row.averageLatency as number,
+    minLatency: row.minLatency as number,
+    maxLatency: row.maxLatency as number,
+    totalTokens: row.totalTokens as number,
+    errors: (row.errors as unknown[]).filter((item): item is string => typeof item === "string"),
+  };
 }
 
 export function truncatePrompt(prompt: string) {
@@ -68,12 +97,12 @@ export async function readBenchmarkHistory() {
       .filter(Boolean)
       .map((line) => {
         try {
-          return JSON.parse(line) as unknown;
+          return normalizeHistoryRow(JSON.parse(line) as unknown);
         } catch {
           return null;
         }
       })
-      .filter(isHistoryRow)
+      .filter((row): row is BenchmarkHistoryRow => row !== null)
       .reverse();
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
