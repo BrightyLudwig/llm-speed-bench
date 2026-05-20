@@ -62,15 +62,19 @@ export const providerPresets: ProviderPreset[] = [
   { id: "lingyiwanwu", name: "零一万物", protocol: "openai-chat", url: "https://api.lingyiwanwu.com/v1/chat/completions" },
 ];
 
-export const protocolOptions: Array<{ id: BenchmarkProtocol; name: string }> = [
-  { id: "openai-chat", name: "OpenAI Chat Completions" },
-  { id: "openai-responses", name: "OpenAI Responses" },
-  { id: "claude-messages", name: "Claude Messages" },
-  { id: "gemini-generate-content", name: "Google Gemini generateContent" },
-  { id: "cohere-chat", name: "Cohere Chat" },
-  { id: "jina-rerank", name: "Jina Rerank" },
-  { id: "custom-json", name: "高级 JSON" },
+export const protocolOptions: Array<{ id: BenchmarkProtocol; name: string; defaultUrl: string }> = [
+  { id: "openai-chat", name: "OpenAI Chat Completions", defaultUrl: "https://api.openai.com/v1/chat/completions" },
+  { id: "openai-responses", name: "OpenAI Responses", defaultUrl: "https://api.openai.com/v1/responses" },
+  { id: "claude-messages", name: "Claude Messages", defaultUrl: "https://api.anthropic.com/v1/messages" },
+  { id: "gemini-generate-content", name: "Google Gemini generateContent", defaultUrl: "https://generativelanguage.googleapis.com/v1beta/models/{{MODEL}}:generateContent" },
+  { id: "cohere-chat", name: "Cohere Chat", defaultUrl: "https://api.cohere.com/v2/chat" },
+  { id: "jina-rerank", name: "Jina Rerank", defaultUrl: "https://api.jina.ai/v1/rerank" },
+  { id: "custom-json", name: "高级 JSON", defaultUrl: "https://api.example.com/v1/chat/completions" },
 ];
+
+export function getProtocolOption(protocol: BenchmarkProtocol) {
+  return protocolOptions.find((option) => option.id === protocol) ?? protocolOptions[0];
+}
 
 function replacePlaceholders(value: string, input: ProtocolRequestInput) {
   return value

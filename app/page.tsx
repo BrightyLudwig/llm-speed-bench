@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
-import { providerPresets, protocolOptions, type BenchmarkProtocol } from "@/lib/benchmark-protocols";
+import { getProtocolOption, providerPresets, protocolOptions, type BenchmarkProtocol } from "@/lib/benchmark-protocols";
 
 type BenchmarkHistoryRow = {
   id: string;
@@ -252,8 +252,17 @@ export default function Home() {
       ...form,
       providerPreset: preset.id,
       protocol: preset.protocol,
-      url: preset.url || form.url,
+      url: preset.url || getProtocolOption(preset.protocol).defaultUrl,
       mode: preset.protocol === "custom-json" ? "custom" : "protocol",
+    });
+  }
+
+  function applyProtocol(protocol: BenchmarkProtocol) {
+    setForm({
+      ...form,
+      protocol,
+      providerPreset: "custom",
+      url: getProtocolOption(protocol).defaultUrl,
     });
   }
 
@@ -302,15 +311,13 @@ export default function Home() {
             <p className={theme.softMuted}>暂无历史结果。</p>
           ) : (
             <>
-              <div className="overflow-auto">
+              <div className={`themed-scrollbar themed-scrollbar-${themeName} overflow-auto pb-3`}>
                 <table className="w-full min-w-[96rem] border-separate border-spacing-y-2 text-left text-sm">
                   <thead className={theme.tableHead}>
                     <tr>
                       <th className="px-3 py-2 font-medium">排名</th>
                       <th className="px-3 py-2 font-medium">时间</th>
-                      <th className="px-3 py-2 font-medium">协议</th>
                       <th className="px-3 py-2 font-medium">服务商</th>
-                      <th className="px-3 py-2 font-medium">地址</th>
                       <th className="px-3 py-2 font-medium">模型</th>
                       <th className="px-3 py-2 font-medium">Prompt</th>
                       <th className="px-3 py-2 font-medium">并发/批次</th>
@@ -319,6 +326,8 @@ export default function Home() {
                       <th className="px-3 py-2 font-bold">Tokens/s</th>
                       <th className="px-3 py-2 font-bold">平均延迟</th>
                       <th className="px-3 py-2 font-bold">总耗时</th>
+                      <th className="px-3 py-2 font-medium">协议</th>
+                      <th className="px-3 py-2 font-medium">地址</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -333,11 +342,7 @@ export default function Home() {
                             </span>
                           </td>
                           <td className="px-3 py-3 align-top whitespace-nowrap">{formatDate(row.createdAt)}</td>
-                          <td className="px-3 py-3 align-top whitespace-nowrap">{getProtocolName(row.protocol)}</td>
                           <td className="px-3 py-3 align-top whitespace-nowrap">{getProviderName(row.providerPreset)}</td>
-                          <td className="px-3 py-3 align-top">
-                            <div className="max-w-[20rem] truncate font-medium" title={row.url}>{row.url}</div>
-                          </td>
                           <td className="px-3 py-3 align-top">
                             <div className="max-w-48 truncate font-medium" title={row.modelName}>{row.modelName}</div>
                           </td>
@@ -350,6 +355,10 @@ export default function Home() {
                           <td className="px-3 py-3 align-top font-bold whitespace-nowrap">{formatNumber(row.tokensPerSecond)}</td>
                           <td className="px-3 py-3 align-top font-bold whitespace-nowrap">{formatNumber(row.averageLatency)} 秒</td>
                           <td className="px-3 py-3 align-top font-bold whitespace-nowrap">{formatNumber(row.totalTime)} 秒</td>
+                          <td className="px-3 py-3 align-top whitespace-nowrap">{getProtocolName(row.protocol)}</td>
+                          <td className="px-3 py-3 align-top">
+                            <div className="max-w-[20rem] truncate font-medium" title={row.url}>{row.url}</div>
+                          </td>
                         </tr>
                       );
                     })}
@@ -430,7 +439,7 @@ export default function Home() {
                     <span className={`text-sm ${theme.muted}`}>调用协议</span>
                     <select
                       value={form.protocol}
-                      onChange={(event) => setForm({ ...form, protocol: event.target.value as BenchmarkProtocol, providerPreset: "custom" })}
+                      onChange={(event) => applyProtocol(event.target.value as BenchmarkProtocol)}
                       className={`mt-2 w-full rounded-2xl border px-4 py-3 outline-none transition ${theme.input}`}
                     >
                       {protocolOptions.filter((item) => item.id !== "custom-json").map((item) => (
